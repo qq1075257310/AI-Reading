@@ -14,6 +14,7 @@ export interface Book {
   filename: string;
   chapters: Chapter[];
   title?: string;
+  catalogId?: string;
   objectUrls?: string[]; // Released when the book is replaced or the reader unmounts
 }
 

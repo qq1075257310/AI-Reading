@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Book, TTSConfig } from './types';
 import { parseBookContent } from './utils/parser';
 import { parseEpub } from './utils/epub';
+import { RecommendedBooks } from './components/RecommendedBooks';
+import { downloadLibraryFile, findLibraryBook, parseLibraryText, type LibraryBook } from './utils/library';
 import { listBooks, saveBook, loadBook, saveProgress, deleteBook,
   type ShelfEntry, type ReadingProgress } from './utils/bookshelf';
 import { useTTS } from './hooks/useTTS';
@@ -171,7 +173,7 @@ const App: React.FC = () => {
   }, [activeSegmentIndex, currentChapterIndex, isSpeaking]);
 
   // File picker and drag-and-drop share parsing, validation and persistent storage.
-  const importFile = async (file: File) => {
+  const importFile = async (input: File | LibraryBook) => {
     if (importInProgressRef.current || loadingRef.current) return;
     importInProgressRef.current = true;
     setIsLoading(true);
@@ -179,6 +181,8 @@ const App: React.FC = () => {
     shouldAutoPlay.current = false;
     ttsStop();
     try {
+      const entry = input instanceof File ? undefined : input;
+      const file = input instanceof File ? input : await downloadLibraryFile(input);
       const extension = file.name.split('.').pop()?.toLowerCase();
       if (extension !== 'txt' && extension !== 'epub') {
         throw new Error('请选择 TXT 或 EPUB 文件');
@@ -194,7 +198,7 @@ const App: React.FC = () => {
         let text = new TextDecoder('utf-8').decode(data);
         if (text.includes('\uFFFD')) text = new TextDecoder('gb18030').decode(data);
         if (!text.trim()) throw new Error('TXT 文件没有可读取的正文');
-        parsedBook = parseBookContent(file.name, text);
+        parsedBook = entry ? parseLibraryText(entry, text) : parseBookContent(file.name, text);
       }
       let savedId: number | null = null;
       try {
@@ -218,6 +222,12 @@ const App: React.FC = () => {
     }
   };
   dropImportRef.current = importFile;
+
+  const openRecommendedBook = (entry: LibraryBook) => {
+    const cached = shelf.find(item => item.catalogId === entry.id);
+    if (cached?.id !== undefined) void openCachedBook(cached.id);
+    else void importFile(entry);
+  };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -416,9 +426,13 @@ const App: React.FC = () => {
 
   if (!book) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-[#F7F6F2] p-4">
+      <div className="min-h-screen bg-[#F7F6F2] px-4 py-8 md:py-12">
         {dropOverlay}
-        <div className="bg-white p-10 rounded-2xl shadow-xl text-center max-w-md w-full border border-stone-100">
+        <div className="mx-auto max-w-7xl grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1fr)] gap-6 items-start">
+        <div className="order-2 xl:order-1">
+          <RecommendedBooks language="zh" disabled={isLoading} onRead={openRecommendedBook} />
+        </div>
+        <div className="order-1 xl:order-2 bg-white p-6 md:p-10 rounded-2xl shadow-xl text-center w-full border border-stone-100">
           <BookOpen size={64} className="mx-auto text-amber-600 mb-6" />
           <h1 className="text-3xl font-serif font-bold text-stone-800 mb-2">ZenReader</h1>
           <p className="text-stone-500 mb-8">本地 TXT / EPUB 小说沉浸式阅读器</p>
@@ -466,11 +480,16 @@ const App: React.FC = () => {
             </div>
           </section>
         </div>
+        <div className="order-3">
+          <RecommendedBooks language="en" disabled={isLoading} onRead={openRecommendedBook} />
+        </div>
+        </div>
       </div>
     );
   }
 
   const currentChapter = book.chapters[currentChapterIndex];
+  const libraryEntry = book.catalogId ? findLibraryBook(book.catalogId) : undefined;
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F7F6F2]">
@@ -546,6 +565,11 @@ const App: React.FC = () => {
         {isLoading && <p role="status" className="px-4 py-2 text-amber-700">正在导入书籍...</p>}
         {importError && <p role="alert" className="px-4 py-2 text-red-600">{importError}</p>}
         {storageError && <p role="alert" className="px-4 py-2 text-red-600">{storageError}</p>}
+        {libraryEntry && <div className="px-4 py-2 text-xs text-stone-500 border-b border-stone-200/60 flex flex-wrap gap-x-3 gap-y-1">
+          <span>{libraryEntry.language === 'zh' ? '古典原文 · 繁体' : '英文原版'} · {libraryEntry.author}</span>
+          <a href={libraryEntry.sourceUrl} target="_blank" rel="noreferrer" className="underline">来源与版本</a>
+          <a href="/library/SOURCES.md" target="_blank" rel="noreferrer" className="underline">版权说明</a>
+        </div>}
 
         {/* Reader Content */}
         <div 

@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie';
 import { Book } from '../types';
 import { parseEpub } from './epub';
 import { parseBookContent } from './parser';
+import { findLibraryBook, parseLibraryText } from './library';
 
 export interface ReadingProgress {
   chapterIndex: number;
@@ -13,12 +14,13 @@ export interface StoredBook {
   title: string;
   filename?: string;
   format?: 'txt' | 'epub';
+  catalogId?: string;
   data?: ArrayBuffer;
   content?: string; // Original online bookshelf stored decoded TXT in this field.
   lastReadTime: number;
   progress?: ReadingProgress;
 }
-export type ShelfEntry = Pick<StoredBook, 'id' | 'title' | 'format' | 'lastReadTime' | 'progress'>;
+export type ShelfEntry = Pick<StoredBook, 'id' | 'title' | 'format' | 'lastReadTime' | 'progress' | 'catalogId'>;
 
 // Keep the old online database name AND schema version. Never clear or rebuild it.
 class Bookshelf extends Dexie {
@@ -32,8 +34,8 @@ export const bookshelf = new Bookshelf();
 
 export async function listBooks(): Promise<ShelfEntry[]> {
   const records = await bookshelf.books.orderBy('lastReadTime').reverse().toArray();
-  return records.map(({ id, title, format, lastReadTime, progress }) =>
-    ({ id, title, format, lastReadTime, progress }));
+  return records.map(({ id, title, format, lastReadTime, progress, catalogId }) =>
+    ({ id, title, format, lastReadTime, progress, catalogId }));
 }
 
 export async function saveBook(file: File, data: ArrayBuffer, book: Book): Promise<number> {
@@ -42,6 +44,7 @@ export async function saveBook(file: File, data: ArrayBuffer, book: Book): Promi
     filename: file.name,
     format: file.name.toLowerCase().endsWith('.epub') ? 'epub' : 'txt',
     data,
+    catalogId: book.catalogId,
     lastReadTime: Date.now(),
     progress: { chapterIndex: 0, segmentIndex: 0, scrollTop: 0 },
   });
@@ -60,7 +63,8 @@ export async function loadBook(id: number): Promise<{ book: Book; progress?: Rea
   } else if (record.data) {
     let text = new TextDecoder('utf-8').decode(record.data);
     if (text.includes('\uFFFD')) text = new TextDecoder('gb18030').decode(record.data);
-    book = parseBookContent(filename, text);
+    const entry = record.catalogId ? findLibraryBook(record.catalogId) : undefined;
+    book = entry ? parseLibraryText(entry, text) : parseBookContent(filename, text);
   } else {
     throw new Error('这条缓存缺少书籍内容，请重新导入；原记录仍保留在书架');
   }

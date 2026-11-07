@@ -21,6 +21,14 @@ View your app in AI Studio: https://ai.studio/apps/drive/1MhRqWx0VbzV1ZAlLyFxD_R
 
 检查：`npm test`、`npm run typecheck`、`npm run build`。
 
+## 首页经典书库
+
+首页桌面两侧展示中文经典和英文原著，每组从六本审核书目中展示三本。按访问者本地日期每日自动轮换，保持页面打开或切回页面时也会更新；“换一批”可立即切换。手机端排列在个人书架下方。
+
+首次点击才从本站静态资源下载压缩正文，自动保存到本地书架。已保存的推荐书再次打开会恢复阅读进度，不重复下载、不重复入库。推荐轮换不会删除用户缓存。
+
+书目、版本及版权说明见 [SOURCES.md](public/library/SOURCES.md)，元数据及正文校验值见 `data/library.ts`。正文采用古典原语言版本，不包含现代译本或商业封面。书目内的推荐轮换无需后台；扩充书库需要审核版本，再使用 `python scripts/update-library.py` 更新资源，不会自动抓取未经审核的新书。
+
 ## 本地启动
 
 **Prerequisites:**  Node.js
