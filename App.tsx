@@ -28,7 +28,8 @@ const App: React.FC = () => {
 
   // --- Custom Hooks ---
   const { 
-    speakSegment, 
+    speakSegment,
+    updateConfig: updateTTSConfig, 
     pause: ttsPause, 
     resume: ttsResume, 
     stop: ttsStop, 
@@ -105,7 +106,7 @@ const App: React.FC = () => {
   // --- Logic: TTS Flow Control ---
 
   // Trigger speaking the current segment
-  const playCurrentSegment = () => {
+  const playCurrentSegment = (config: TTSConfig = ttsConfig) => {
     if (!book) return;
     
     const chapter = book.chapters[currentChapterIndex];
@@ -113,7 +114,7 @@ const App: React.FC = () => {
 
     const text = chapter.segments[activeSegmentIndex];
     
-    speakSegment(text, ttsConfig, () => {
+    speakSegment(text, config, () => {
       // On End of segment:
       if (activeSegmentIndex < chapter.segments.length - 1) {
         // Move to next segment
@@ -150,6 +151,17 @@ const App: React.FC = () => {
     } else {
       shouldAutoPlay.current = true;
       playCurrentSegment();
+    }
+  };
+
+  const handleTTSConfigChange = (config: TTSConfig) => {
+    const voiceChanged = (config.voiceURI || null) !== (ttsConfig.voiceURI || null);
+    setTTSConfig(config);
+    if (voiceChanged && book) {
+      shouldAutoPlay.current = true;
+      playCurrentSegment(config);
+    } else {
+      updateTTSConfig(config);
     }
   };
 
@@ -344,7 +356,7 @@ const App: React.FC = () => {
           onNext={handleNextChapter}
           onPrev={handlePrevChapter}
           config={ttsConfig}
-          onConfigChange={setTTSConfig}
+          onConfigChange={handleTTSConfigChange}
           voices={supportedVoices}
           currentChapterTitle={currentChapter.title}
         />

@@ -11,6 +11,7 @@ export const useTTS = () => {
     config: TTSConfig;
     onEnd: () => void;
     offset: number;
+    hasBoundary: boolean;
   } | null>(null);
 
   // Invalidate before cancel(): some engines dispatch cancellation events immediately.
@@ -61,6 +62,7 @@ export const useTTS = () => {
       if (utteranceRef.current !== utterance) return;
       // Keep the last spoken word so resuming never skips unread text.
       playback.offset = startOffset + event.charIndex;
+      playback.hasBoundary = true;
     };
     utterance.onend = () => {
       if (utteranceRef.current !== utterance) return;
@@ -89,7 +91,7 @@ export const useTTS = () => {
 
   const speakSegment = useCallback((text: string, config: TTSConfig, onEnd: () => void) => {
     cancelUtterance();
-    playbackRef.current = { text, config: { ...config }, onEnd, offset: 0 };
+    playbackRef.current = { text, config: { ...config }, onEnd, offset: 0, hasBoundary: false };
     startUtterance();
   }, [cancelUtterance, startUtterance]);
 
@@ -106,6 +108,38 @@ export const useTTS = () => {
     startUtterance();
   }, [startUtterance]);
 
+  const updateConfig = useCallback((config: TTSConfig) => {
+    const playback = playbackRef.current;
+    if (!playback) return;
+    const previous = playback.config;
+    const voiceChanged = (previous.voiceURI || null) !== (config.voiceURI || null);
+    const settingsChanged = previous.rate !== config.rate ||
+      previous.pitch !== config.pitch || previous.volume !== config.volume;
+    playback.config = { ...config };
+
+    if (voiceChanged) {
+      cancelUtterance();
+      playback.offset = 0;
+      playback.hasBoundary = false;
+      startUtterance();
+    } else if (settingsChanged && utteranceRef.current) {
+      if (playback.hasBoundary) {
+        // Recreate at the last known word: changing rate on an active
+        // utterance is ignored by many engines.
+        cancelUtterance();
+        startUtterance();
+      } else {
+        // Without boundary events there is no safe text position to resume.
+        // Try an in-place update, never rewind the whole paragraph for speed.
+        const utterance = utteranceRef.current;
+        utterance.rate = config.rate;
+        utterance.pitch = config.pitch;
+        utterance.volume = config.volume;
+      }
+    }
+    // While paused, speed changes only update the retained configuration.
+  }, [cancelUtterance, startUtterance]);
+
   const stop = useCallback(() => {
     playbackRef.current = null;
     cancelUtterance();
@@ -113,5 +147,5 @@ export const useTTS = () => {
     setIsPaused(false);
   }, [cancelUtterance]);
 
-  return { supportedVoices, isSpeaking, isPaused, speakSegment, pause, resume, stop };
+  return { supportedVoices, isSpeaking, isPaused, speakSegment, pause, resume, stop, updateConfig };
 };
