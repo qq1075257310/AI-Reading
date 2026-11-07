@@ -21,6 +21,7 @@ const App: React.FC = () => {
   const [shelf, setShelf] = useState<ShelfEntry[]>([]);
   const [isShelfLoading, setIsShelfLoading] = useState(true);
   const [bookId, setBookId] = useState<number | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
   
   const [ttsConfig, setTTSConfig] = useState<TTSConfig>({
     rate: 1.0,
@@ -35,6 +36,10 @@ const App: React.FC = () => {
   const contentContainerRef = useRef<HTMLDivElement>(null);
   const restoreScrollRef = useRef<number | null>(null);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const importInProgressRef = useRef(false);
+  const dropImportRef = useRef<(file: File) => Promise<void>>(null);
+  const loadingRef = useRef(isLoading);
+  loadingRef.current = isLoading;
   const progressRef = useRef<{ id: number; progress: ReadingProgress } | null>(null);
   progressRef.current = bookId === null ? null : {
     id: bookId, progress: { chapterIndex: currentChapterIndex, segmentIndex: activeSegmentIndex,
@@ -165,11 +170,10 @@ const App: React.FC = () => {
     }
   }, [activeSegmentIndex, currentChapterIndex, isSpeaking]);
 
-  // Handle File Upload
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    event.target.value = '';
+  // File picker and drag-and-drop share parsing, validation and persistent storage.
+  const importFile = async (file: File) => {
+    if (importInProgressRef.current || loadingRef.current) return;
+    importInProgressRef.current = true;
     setIsLoading(true);
     setImportError('');
     shouldAutoPlay.current = false;
@@ -209,9 +213,72 @@ const App: React.FC = () => {
     } catch (error) {
       setImportError(error instanceof Error ? error.message : '读取文件失败');
     } finally {
+      importInProgressRef.current = false;
       setIsLoading(false);
     }
   };
+  dropImportRef.current = importFile;
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (file) void importFile(file);
+  };
+
+  useEffect(() => {
+    let depth = 0;
+    const hasFiles = (event: DragEvent) =>
+      Array.from(event.dataTransfer?.types || []).includes('Files');
+    const reset = () => {
+      depth = 0;
+      setIsDraggingFile(false);
+    };
+    const enter = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      depth += 1;
+      if (!loadingRef.current) setIsDraggingFile(true);
+    };
+    const over = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      // Prevent the browser from navigating to a dropped local file.
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = loadingRef.current ? 'none' : 'copy';
+      }
+    };
+    const leave = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) reset();
+    };
+    const drop = (event: DragEvent) => {
+      if (!hasFiles(event) && !event.dataTransfer?.files.length) return;
+      event.preventDefault();
+      reset();
+      if (loadingRef.current || importInProgressRef.current) return;
+      const files = Array.from(event.dataTransfer?.files || []);
+      if (files.length !== 1) {
+        setImportError('请每次拖入一个 TXT 或 EPUB 文件');
+        return;
+      }
+      void dropImportRef.current?.(files[0]);
+    };
+    window.addEventListener('dragenter', enter);
+    window.addEventListener('dragover', over);
+    window.addEventListener('dragleave', leave);
+    window.addEventListener('drop', drop);
+    window.addEventListener('dragend', reset);
+    window.addEventListener('blur', reset);
+    return () => {
+      window.removeEventListener('dragenter', enter);
+      window.removeEventListener('dragover', over);
+      window.removeEventListener('dragleave', leave);
+      window.removeEventListener('drop', drop);
+      window.removeEventListener('dragend', reset);
+      window.removeEventListener('blur', reset);
+    };
+  }, []);
 
   // --- Logic: TTS Flow Control ---
 
@@ -337,9 +404,20 @@ const App: React.FC = () => {
 
   // --- Rendering ---
 
+  const dropOverlay = isDraggingFile && (
+    <div role="status" className="fixed inset-0 z-[100] pointer-events-none flex items-center justify-center bg-amber-50/90 border-4 border-dashed border-amber-500">
+      <div className="text-center p-8">
+        <Upload size={48} className="mx-auto mb-4 text-amber-600" />
+        <p className="text-xl font-bold text-stone-800">松开以导入书籍</p>
+        <p className="mt-2 text-stone-600">支持 TXT / EPUB，每次一个文件</p>
+      </div>
+    </div>
+  );
+
   if (!book) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[#F7F6F2] p-4">
+        {dropOverlay}
         <div className="bg-white p-10 rounded-2xl shadow-xl text-center max-w-md w-full border border-stone-100">
           <BookOpen size={64} className="mx-auto text-amber-600 mb-6" />
           <h1 className="text-3xl font-serif font-bold text-stone-800 mb-2">ZenReader</h1>
@@ -350,7 +428,7 @@ const App: React.FC = () => {
             className="cursor-pointer border-2 border-dashed border-amber-200 hover:border-amber-400 hover:bg-amber-50 transition-all rounded-xl p-8 flex flex-col items-center"
           >
             <Upload size={32} className="text-amber-500 mb-2" />
-            <span className="text-stone-600 font-medium">点击上传 TXT 或 EPUB 文件</span>
+            <span className="text-stone-600 font-medium">点击选择或拖入 TXT / EPUB 文件</span>
             <input 
               type="file" 
               ref={fileInputRef} 
@@ -396,6 +474,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F7F6F2]">
+      {dropOverlay}
       {/* Sidebar */}
       <aside 
         className={`
