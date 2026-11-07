@@ -2,9 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Book, TTSConfig } from './types';
 import { parseBookContent } from './utils/parser';
 import { parseEpub } from './utils/epub';
+import { listBooks, saveBook, loadBook, saveProgress, deleteBook,
+  type ShelfEntry, type ReadingProgress } from './utils/bookshelf';
 import { useTTS } from './hooks/useTTS';
 import { ControlBar } from './components/ControlBar';
-import { Menu, BookOpen, Upload, AlertCircle } from 'lucide-react';
+import { Menu, BookOpen, Upload, Library, Trash2 } from 'lucide-react';
 
 const App: React.FC = () => {
   // --- State ---
@@ -15,6 +17,10 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [importError, setImportError] = useState('');
+  const [storageError, setStorageError] = useState('');
+  const [shelf, setShelf] = useState<ShelfEntry[]>([]);
+  const [isShelfLoading, setIsShelfLoading] = useState(true);
+  const [bookId, setBookId] = useState<number | null>(null);
   
   const [ttsConfig, setTTSConfig] = useState<TTSConfig>({
     rate: 1.0,
@@ -27,6 +33,13 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeSegmentRef = useRef<HTMLSpanElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
+  const restoreScrollRef = useRef<number | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const progressRef = useRef<{ id: number; progress: ReadingProgress } | null>(null);
+  progressRef.current = bookId === null ? null : {
+    id: bookId, progress: { chapterIndex: currentChapterIndex, segmentIndex: activeSegmentIndex,
+      scrollTop: restoreScrollRef.current ?? contentContainerRef.current?.scrollTop ?? 0 },
+  };
 
   // --- Custom Hooks ---
   const { 
@@ -41,6 +54,102 @@ const App: React.FC = () => {
   } = useTTS();
 
   // --- Effects ---
+
+  const refreshShelf = async () => {
+    try {
+      setShelf(await listBooks());
+    } catch {
+      setStorageError('无法读取本地书架，请检查浏览器是否允许网站存储。现有数据不会被删除。');
+    } finally {
+      setIsShelfLoading(false);
+    }
+  };
+  useEffect(() => { void refreshShelf(); }, []);
+
+  const persistProgress = async () => {
+    const current = progressRef.current;
+    if (!current) return;
+    try {
+      await saveProgress(current.id, current.progress);
+    } catch {
+      setStorageError('阅读进度保存失败，请检查浏览器存储空间。');
+    }
+  };
+
+  useEffect(() => {
+    if (restoreScrollRef.current !== null && contentContainerRef.current) {
+      contentContainerRef.current.scrollTop = restoreScrollRef.current;
+      restoreScrollRef.current = null;
+    }
+    void persistProgress();
+  }, [book, bookId, currentChapterIndex, activeSegmentIndex]);
+
+  useEffect(() => {
+    const flush = () => { void persistProgress(); };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    };
+  }, []);
+
+  const handleReaderScroll = () => {
+    if (progressRef.current && contentContainerRef.current) {
+      progressRef.current.progress.scrollTop = contentContainerRef.current.scrollTop;
+    }
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = setTimeout(() => { void persistProgress(); }, 250);
+  };
+
+  const openCachedBook = async (id: number) => {
+    if (isLoading) return;
+    setIsLoading(true);
+    setImportError('');
+    shouldAutoPlay.current = false;
+    ttsStop();
+    try {
+      const { book: savedBook, progress } = await loadBook(id);
+      const chapter = Math.max(0, Math.min(progress?.chapterIndex || 0, savedBook.chapters.length - 1));
+      const segment = Math.max(0, Math.min(progress?.segmentIndex || 0,
+        Math.max(0, savedBook.chapters[chapter].segments.length - 1)));
+      restoreScrollRef.current = Math.max(0, progress?.scrollTop || 0);
+      setBook(savedBook);
+      setBookId(id);
+      setCurrentChapterIndex(chapter);
+      setActiveSegmentIndex(segment);
+      if (window.innerWidth < 768) setIsSidebarOpen(false);
+    } catch (error) {
+      // A failed read must never remove the user's only cached copy.
+      setImportError(error instanceof Error ? error.message : '读取缓存失败，原记录仍保留');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const returnToShelf = async () => {
+    shouldAutoPlay.current = false;
+    ttsStop();
+    await persistProgress();
+    setBook(null);
+    setBookId(null);
+    setImportError('');
+    await refreshShelf();
+  };
+
+  const removeCachedBook = async (entry: ShelfEntry) => {
+    if (entry.id === undefined || !window.confirm(`确定从本地书架删除《${entry.title}》吗？`)) return;
+    try {
+      await deleteBook(entry.id);
+      await refreshShelf();
+    } catch {
+      setStorageError('删除失败，书架记录仍保留。');
+    }
+  };
 
   useEffect(() => () => {
     book?.objectUrls?.forEach(url => URL.revokeObjectURL(url));
@@ -83,7 +192,16 @@ const App: React.FC = () => {
         if (!text.trim()) throw new Error('TXT 文件没有可读取的正文');
         parsedBook = parseBookContent(file.name, text);
       }
+      let savedId: number | null = null;
+      try {
+        savedId = await saveBook(file, data, parsedBook);
+        setStorageError('');
+      } catch {
+        setStorageError('本书可以阅读，但未能保存到本地书架。请检查存储权限或剩余空间。');
+      }
+      restoreScrollRef.current = 0;
       setBook(parsedBook);
+      setBookId(savedId);
       setCurrentChapterIndex(0);
       setActiveSegmentIndex(0);
       contentContainerRef.current?.scrollTo(0, 0);
@@ -244,7 +362,31 @@ const App: React.FC = () => {
           </div>
           {isLoading && <p className="mt-4 text-amber-600 animate-pulse">正在解析书籍目录...</p>}
           {importError && <p role="alert" className="mt-4 text-red-600">{importError}</p>}
+          {storageError && <p role="alert" className="mt-4 text-red-600">{storageError}</p>}
           <p className="text-xs text-stone-400 mt-4">TXT 支持 UTF-8 / GBK；EPUB 支持目录及插图（无 DRM，最大 50 MB）</p>
+          <p className="text-xs text-stone-400 mt-2">导入文件保存在当前浏览器的本地书架，刷新后可继续阅读。</p>
+          <section aria-label="本地书架" className="mt-6 text-left">
+            <h2 className="font-bold text-stone-700 mb-3">本地书架</h2>
+            {isShelfLoading ? <p role="status">正在读取书架...</p>
+              : shelf.length === 0 && <p className="text-sm text-stone-500">书架为空，先导入一本书吧。</p>}
+            <div className="space-y-3">
+              {shelf.map(entry => <div key={entry.id}
+                className="flex items-center gap-2 border border-stone-200 rounded-lg p-3">
+                <button disabled={isLoading} onClick={() => void openCachedBook(entry.id!)}
+                  className="min-w-0 flex-1 text-left hover:text-amber-700 disabled:opacity-50">
+                  <span className="block break-words font-medium">{entry.title}</span>
+                  <span className="block text-xs text-stone-500 mt-1">
+                    {entry.format?.toUpperCase() || 'TXT'} · 上次阅读：{new Date(entry.lastReadTime).toLocaleString()}
+                  </span>
+                </button>
+                <button disabled={isLoading} onClick={() => void removeCachedBook(entry)}
+                  aria-label={`删除《${entry.title}》`}
+                  className="shrink-0 p-2 text-red-600 hover:bg-red-50 rounded-full">
+                  <Trash2 size={18} />
+                </button>
+              </div>)}
+            </div>
+          </section>
         </div>
       </div>
     );
@@ -297,6 +439,11 @@ const App: React.FC = () => {
       <main className="flex-1 flex flex-col h-full relative">
         {/* Header */}
         <header className="h-14 flex items-center px-4 border-b border-stone-200/50 bg-[#F7F6F2] z-10">
+          <button onClick={() => void returnToShelf()} disabled={isLoading}
+            aria-label="返回书架" title="返回书架"
+            className="p-2 hover:bg-stone-200 rounded-full text-stone-600">
+            <Library size={20} />
+          </button>
           <button 
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
             aria-label="切换目录"
@@ -319,10 +466,12 @@ const App: React.FC = () => {
         </header>
         {isLoading && <p role="status" className="px-4 py-2 text-amber-700">正在导入书籍...</p>}
         {importError && <p role="alert" className="px-4 py-2 text-red-600">{importError}</p>}
+        {storageError && <p role="alert" className="px-4 py-2 text-red-600">{storageError}</p>}
 
         {/* Reader Content */}
         <div 
           ref={contentContainerRef}
+          onScroll={handleReaderScroll}
           className="flex-1 overflow-y-auto px-4 md:px-0 pb-24 scroll-smooth"
         >
           <div className="max-w-3xl mx-auto py-8 md:py-12">
