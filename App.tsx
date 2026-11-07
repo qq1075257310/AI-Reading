@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Book, TTSConfig } from './types';
 import { parseBookContent } from './utils/parser';
+import { parseEpub } from './utils/epub';
 import { useTTS } from './hooks/useTTS';
 import { ControlBar } from './components/ControlBar';
 import { Menu, BookOpen, Upload, AlertCircle } from 'lucide-react';
@@ -13,6 +14,7 @@ const App: React.FC = () => {
   
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
+  const [importError, setImportError] = useState('');
   
   const [ttsConfig, setTTSConfig] = useState<TTSConfig>({
     rate: 1.0,
@@ -40,6 +42,10 @@ const App: React.FC = () => {
 
   // --- Effects ---
 
+  useEffect(() => () => {
+    book?.objectUrls?.forEach(url => URL.revokeObjectURL(url));
+  }, [book]);
+
   // Scroll active segment into view
   useEffect(() => {
     if (activeSegmentRef.current && isSpeaking) {
@@ -51,56 +57,42 @@ const App: React.FC = () => {
   }, [activeSegmentIndex, currentChapterIndex, isSpeaking]);
 
   // Handle File Upload
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-
-    setIsLoading(true);
-    ttsStop();
-    
-    const processText = (text: string) => {
-      if (text) {
-        const parsedBook = parseBookContent(file.name, text);
-        setBook(parsedBook);
-        setCurrentChapterIndex(0);
-        setActiveSegmentIndex(0);
-        // Reset scroll position
-        contentContainerRef.current?.scrollTo(0, 0);
-      }
-      setIsLoading(false);
-      // On mobile, close sidebar after load
-      if (window.innerWidth < 768) setIsSidebarOpen(false);
-    };
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      
-      // Intelligent Encoding Detection
-      // If UTF-8 decoding produced replacement characters (), it's likely the file is GBK/GB18030
-      if (text.includes('\uFFFD')) {
-        console.log("UTF-8 decoding failed (found ), retrying with GB18030...");
-        const retryReader = new FileReader();
-        retryReader.onload = (retryE) => {
-          const retryText = retryE.target?.result as string;
-          processText(retryText);
-        };
-        retryReader.readAsText(file, 'GB18030');
-      } else {
-        processText(text);
-      }
-    };
-
-    reader.onerror = () => {
-      alert("读取文件失败");
-      setIsLoading(false);
-    };
-
-    // Default to UTF-8 first
-    reader.readAsText(file); 
-    
-    // Reset input value so the same file can be re-uploaded if needed
     event.target.value = '';
+    setIsLoading(true);
+    setImportError('');
+    shouldAutoPlay.current = false;
+    ttsStop();
+    try {
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      if (extension !== 'txt' && extension !== 'epub') {
+        throw new Error('请选择 TXT 或 EPUB 文件');
+      }
+      if (extension === 'epub' && file.size > 50 * 1024 * 1024) {
+        throw new Error('EPUB 文件不能超过 50 MB');
+      }
+      const data = await file.arrayBuffer();
+      let parsedBook: Book;
+      if (extension === 'epub') {
+        parsedBook = await parseEpub(file.name, data);
+      } else {
+        let text = new TextDecoder('utf-8').decode(data);
+        if (text.includes('\uFFFD')) text = new TextDecoder('gb18030').decode(data);
+        if (!text.trim()) throw new Error('TXT 文件没有可读取的正文');
+        parsedBook = parseBookContent(file.name, text);
+      }
+      setBook(parsedBook);
+      setCurrentChapterIndex(0);
+      setActiveSegmentIndex(0);
+      contentContainerRef.current?.scrollTo(0, 0);
+      if (window.innerWidth < 768) setIsSidebarOpen(false);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : '读取文件失败');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // --- Logic: TTS Flow Control ---
@@ -110,7 +102,21 @@ const App: React.FC = () => {
     if (!book) return;
     
     const chapter = book.chapters[currentChapterIndex];
-    if (!chapter || activeSegmentIndex >= chapter.segments.length) return;
+    if (!chapter) return;
+    if (!chapter.segments.length) {
+      // Covers and illustration-only sections stay visible, but are never spoken.
+      const next = book.chapters.findIndex((entry, index) =>
+        index > currentChapterIndex && entry.segments.length > 0);
+      if (next >= 0) {
+        setCurrentChapterIndex(next);
+        setActiveSegmentIndex(0);
+      } else {
+        shouldAutoPlay.current = false;
+        ttsStop();
+      }
+      return;
+    }
+    if (activeSegmentIndex >= chapter.segments.length) return;
 
     const text = chapter.segments[activeSegmentIndex];
     
@@ -126,6 +132,7 @@ const App: React.FC = () => {
           setActiveSegmentIndex(0);
         } else {
           // End of Book
+          shouldAutoPlay.current = false;
           ttsStop();
         }
       }
@@ -218,24 +225,26 @@ const App: React.FC = () => {
         <div className="bg-white p-10 rounded-2xl shadow-xl text-center max-w-md w-full border border-stone-100">
           <BookOpen size={64} className="mx-auto text-amber-600 mb-6" />
           <h1 className="text-3xl font-serif font-bold text-stone-800 mb-2">ZenReader</h1>
-          <p className="text-stone-500 mb-8">本地 TXT 小说沉浸式阅读器</p>
+          <p className="text-stone-500 mb-8">本地 TXT / EPUB 小说沉浸式阅读器</p>
           
           <div 
             onClick={() => fileInputRef.current?.click()}
             className="cursor-pointer border-2 border-dashed border-amber-200 hover:border-amber-400 hover:bg-amber-50 transition-all rounded-xl p-8 flex flex-col items-center"
           >
             <Upload size={32} className="text-amber-500 mb-2" />
-            <span className="text-stone-600 font-medium">点击上传 .txt 文件</span>
+            <span className="text-stone-600 font-medium">点击上传 TXT 或 EPUB 文件</span>
             <input 
               type="file" 
               ref={fileInputRef} 
               onChange={handleFileUpload} 
-              accept=".txt" 
+              accept=".txt,.epub,application/epub+zip"
+              disabled={isLoading}
               className="hidden" 
             />
           </div>
           {isLoading && <p className="mt-4 text-amber-600 animate-pulse">正在解析书籍目录...</p>}
-          <p className="text-xs text-stone-400 mt-4">支持 UTF-8 及 GBK/GB18030 编码</p>
+          {importError && <p role="alert" className="mt-4 text-red-600">{importError}</p>}
+          <p className="text-xs text-stone-400 mt-4">TXT 支持 UTF-8 / GBK；EPUB 支持目录及插图（无 DRM，最大 50 MB）</p>
         </div>
       </div>
     );
@@ -254,7 +263,7 @@ const App: React.FC = () => {
       >
         <div className="flex flex-col h-full">
           <div className="p-4 border-b border-stone-200 bg-stone-100">
-             <h2 className="font-bold text-stone-700 truncate" title={book.filename}>{book.filename}</h2>
+             <h2 className="font-bold text-stone-700 truncate" title={book.filename}>{book.title || book.filename}</h2>
              <p className="text-xs text-stone-500 mt-1">共 {book.chapters.length} 章</p>
           </div>
           <div className="flex-1 overflow-y-auto p-2 space-y-1">
@@ -290,6 +299,7 @@ const App: React.FC = () => {
         <header className="h-14 flex items-center px-4 border-b border-stone-200/50 bg-[#F7F6F2] z-10">
           <button 
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            aria-label="切换目录"
             className="p-2 hover:bg-stone-200 rounded-full text-stone-600 mr-3"
           >
             <Menu size={20} />
@@ -297,8 +307,18 @@ const App: React.FC = () => {
           <h2 className="font-serif text-lg font-bold text-stone-800 truncate flex-1 text-center md:text-left">
             {currentChapter.title}
           </h2>
-          <div className="w-8"></div> {/* Spacer for balance */}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isLoading}
+            title="导入另一本文档"
+            aria-label="导入另一本文档"
+            className="p-2 hover:bg-stone-200 rounded-full text-stone-600 disabled:opacity-50"
+          ><Upload size={20} /></button>
+          <input type="file" ref={fileInputRef} onChange={handleFileUpload}
+            accept=".txt,.epub,application/epub+zip" disabled={isLoading} className="hidden" />
         </header>
+        {isLoading && <p role="status" className="px-4 py-2 text-amber-700">正在导入书籍...</p>}
+        {importError && <p role="alert" className="px-4 py-2 text-red-600">{importError}</p>}
 
         {/* Reader Content */}
         <div 
@@ -311,11 +331,21 @@ const App: React.FC = () => {
             </h1>
             
             <div className="space-y-4 text-lg md:text-xl leading-relaxed text-stone-700 font-serif">
-              {currentChapter.segments.map((segment, idx) => {
+              {(currentChapter.blocks || currentChapter.segments.map((_, segmentIndex) =>
+                ({ type: 'text' as const, segmentIndex }))).map((block, blockIndex) => {
+                if (block.type === 'image') {
+                  return <figure key={blockIndex} className="px-4 py-4">
+                    {block.src ? <img src={block.src} alt={block.alt} loading="lazy"
+                      className="block max-w-full max-h-[80vh] w-auto h-auto mx-auto object-contain rounded" />
+                      : <figcaption className="text-sm text-stone-500">图片无法显示：{block.alt}</figcaption>}
+                  </figure>;
+                }
+                const idx = block.segmentIndex;
+                const segment = currentChapter.segments[idx];
                 const isActive = idx === activeSegmentIndex;
                 return (
                   <p 
-                    key={idx}
+                    key={blockIndex}
                     onClick={() => handleSegmentClick(idx)}
                     className={`
                       px-4 py-1 rounded transition-colors duration-300 cursor-pointer hover:bg-black/5
